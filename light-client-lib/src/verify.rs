@@ -24,50 +24,40 @@ use ckb_verification::{
 
 const DEFAULT_MIN_FEE_RATE: FeeRate = FeeRate(1000);
 
-/// Used to verify if a transaction meets the lowest fee rate
-/// Use self reference here since `DaoCalculator` requires references to consensus and data_loader, but `ContextualTransactionVerifier` can only provide `Arc`s
-#[ouroboros::self_referencing]
-pub struct MinFeeVerifier<DL: 'static> {
+pub struct MinFeeVerifier<DL> {
     min_fee_rate: FeeRate,
     resolved_tx: Arc<ResolvedTransaction>,
     consensus: Arc<Consensus>,
-    data_loader: Arc<DL>,
-    #[borrows(consensus, data_loader)]
-    #[covariant]
-    fee_calculator: DaoCalculator<'this, DL>,
+    data_loader: DL,
 }
-impl<DL: CellDataProvider + HeaderProvider + 'static> MinFeeVerifier<DL> {
-    /// Creates a new `MinFeeVerifier`.
-    pub fn new_with_arc(
+impl<DL: CellDataProvider + HeaderProvider> MinFeeVerifier<DL> {
+    pub fn new(
         min_fee_rate: FeeRate,
         resolved_tx: Arc<ResolvedTransaction>,
         consensus: Arc<Consensus>,
-        data_loader: Arc<DL>,
+        data_loader: DL,
     ) -> Self {
-        MinFeeVerifierBuilder {
+        MinFeeVerifier {
             min_fee_rate,
             resolved_tx,
             consensus,
             data_loader,
-            fee_calculator_builder: |a: &Arc<Consensus>, b: &Arc<DL>| DaoCalculator::new(a, b),
         }
-        .build()
     }
     /// Verify if the transaction meets the lowest fee rate set by `min_fee_rate`
     pub fn verify(&self) -> Result<(), Error> {
-        let fee = self
-            .borrow_fee_calculator()
-            .transaction_fee(self.borrow_resolved_tx())?;
+        let fee = DaoCalculator::new(self.consensus.as_ref(), &self.data_loader)
+            .transaction_fee(&self.resolved_tx)?;
         let tx_size = self
-            .borrow_resolved_tx()
+            .resolved_tx
             .transaction
             .data()
             .serialized_size_in_block();
-        let min_fee = self.borrow_min_fee_rate().fee(tx_size as u64);
+        let min_fee = self.min_fee_rate.fee(tx_size as u64);
         if fee < min_fee {
             return Err(OtherError::new(format!(
                 "Transaction rejected by low fee rate: min_fee_rate = {}, min_fee = {}, fee = {}, tx_size = {}",
-                self.borrow_min_fee_rate(), min_fee, fee, tx_size
+                self.min_fee_rate, min_fee, fee, tx_size
             ))
             .into());
         }
@@ -119,7 +109,7 @@ where
                 Arc::clone(&tx_env),
             ),
             capacity: CapacityVerifier::new(Arc::clone(&rtx), consensus.dao_type_hash()),
-            min_fee_rate: MinFeeVerifier::new_with_arc(
+            min_fee_rate: MinFeeVerifier::new(
                 DEFAULT_MIN_FEE_RATE,
                 Arc::clone(&rtx),
                 Arc::clone(&consensus),
